@@ -281,7 +281,12 @@ class TBFile: public std::ifstream {
         if (statbuf.st_size % 64 != 16)
         {
             std::cerr << "Corrupt tablebase file " << fname.string() << std::endl;
+#ifdef STOCKFISH_EMBEDDED
+            ::close(fd);
+            return *baseAddress = nullptr, nullptr;
+#else
             exit(EXIT_FAILURE);
+#endif
         }
 
         *mapping     = statbuf.st_size;
@@ -292,7 +297,11 @@ class TBFile: public std::ifstream {
         if (*baseAddress == MAP_FAILED)
         {
             std::cerr << "Could not mmap() " << fname.string() << std::endl;
+#ifdef STOCKFISH_EMBEDDED
+            return *baseAddress = nullptr, nullptr;
+#else
             exit(EXIT_FAILURE);
+#endif
         }
 
         #if defined(MADV_RANDOM)
@@ -342,7 +351,12 @@ class TBFile: public std::ifstream {
         if (memcmp(data, Magics[type == WDL], 4))
         {
             std::cerr << "Corrupted table in file " << fname.string() << std::endl;
+#ifdef STOCKFISH_EMBEDDED
+            unmap(*baseAddress, *mapping);
+            return *baseAddress = nullptr, nullptr;
+#else
             exit(EXIT_FAILURE);
+#endif
         }
 
         return data + 4;  // Skip Magics's header
@@ -1418,7 +1432,12 @@ void* mapped(TBTable<Type>& e, const Position& pos) {
     if (data && !set(e, data, (const u8*) e.baseAddress + size))
     {
         std::cerr << "Corrupted table in file " << fname << std::endl;
+#ifdef STOCKFISH_EMBEDDED
+        TBFile::unmap(e.baseAddress, e.mapping);
+        e.baseAddress = nullptr;
+#else
         exit(EXIT_FAILURE);
+#endif
     }
 
     e.ready.store(true, std::memory_order_release);

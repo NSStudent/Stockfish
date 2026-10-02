@@ -17,6 +17,7 @@
 */
 
 #include "network.h"
+#include <stdexcept>
 
 #include <algorithm>
 #include <cstdlib>
@@ -185,7 +186,12 @@ void Network::verify(const std::function<void(std::string_view)>& f,
             f(msg);
         }
 
+#ifdef STOCKFISH_EMBEDDED
+        throw std::runtime_error("NNUE network was not loaded or is incompatible: "
+                                 + evalfilePath.string());
+#else
         exit(EXIT_FAILURE);
+#endif
     }
 
     if (f)

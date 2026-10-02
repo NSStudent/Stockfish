@@ -17,6 +17,7 @@
 */
 
 #include "uci.h"
+#include <stdexcept>
 
 #include <algorithm>
 #include <cctype>
@@ -698,7 +699,12 @@ void UCIEngine::terminate_on_critical_error(const std::string& message) {
     sync_cout << "info string CRITICAL ERROR: Command `" << currentCmd
               << "` failed. Reason: " << message << '\n'
               << sync_endl;
+#ifdef STOCKFISH_EMBEDDED
+    engine.stop();
+    throw std::runtime_error("Command `" + currentCmd + "` failed. Reason: " + message);
+#else
     std::exit(1);
+#endif
 }
 
 }  // namespace Stockfish

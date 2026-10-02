@@ -17,6 +17,7 @@
 */
 
 #include "tt.h"
+#include <stdexcept>
 
 #include <algorithm>
 #include <cassert>
@@ -193,7 +194,12 @@ void TranspositionTable::resize(usize mbSize, ThreadPool& threads) {
     if (!table)
     {
         std::cerr << "Failed to allocate " << mbSize << "MB for transposition table." << std::endl;
+#ifdef STOCKFISH_EMBEDDED
+        throw std::runtime_error("Failed to allocate transposition table: "
+                                 + std::to_string(mbSize) + "MB");
+#else
         exit(EXIT_FAILURE);
+#endif
     }
 
     clear(threads);

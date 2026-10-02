@@ -17,6 +17,7 @@
 */
 
 #include "misc.h"
+#include <stdexcept>
 
 #include <array>
 #include <atomic>
@@ -115,7 +116,11 @@ class Logger {
             if (!l.file.is_open())
             {
                 std::cerr << "Unable to open debug log file " << fname << std::endl;
+#ifdef STOCKFISH_EMBEDDED
+                throw std::runtime_error("Unable to open debug log file: " + fname.string());
+#else
                 exit(EXIT_FAILURE);
+#endif
             }
 
             std::cin.rdbuf(&l.in);
