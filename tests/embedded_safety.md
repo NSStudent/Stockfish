@@ -10,6 +10,8 @@ rtk proxy /private/tmp/fischer-stockfish-audit/stockfish-nnue
 rtk proxy /private/tmp/fischer-stockfish-audit/stockfish-native
 rtk proxy /private/tmp/fischer-stockfish-audit/stockfish-syzygy /path/KQvK.rtbw /path/KQvK.rtbz
 rtk proxy /private/tmp/fischer-stockfish-audit/stockfish-mutate /path/KQvK.rtbw /path/KQvK.rtbz 1800
+rtk proxy python3 tests/run_nnue_mutations.py --seconds 1800
+rtk proxy /private/tmp/fischer-stockfish-audit/stockfish-nnue-mutate --replay /private/tmp/fischer-stockfish-audit/nnue-last-case.bin
 ```
 
 Use the checksummed real fixtures from the host repository's
@@ -18,6 +20,12 @@ violation. The mutation runner uses seed `0x19`, reports its case count and save
 a failing input to `/private/tmp/fischer-stockfish-syzygy-failure.bin`. On toolchains
 with libFuzzer, build `embedded_syzygy_fuzzer.cpp` without
 `FISCHER_MUTATION_RUNNER` and link `-fsanitize=fuzzer,address,undefined`.
+
+The separate signed-LEB128 runner uses seed `0x1919`, known-valid int8/int16/int32
+inputs, mutations of magic/length/payload, truncations and extreme encodings.
+Output guards and accepted-input roundtrips are checked for all three widths.
+The exact current case (count plus bytes) is saved before decoding, and its
+Python launcher imposes an external duration plus 30-second deadline.
 
 `FISCHER_FUZZING` exposes only a test parser for KQvK. It walks the production
 structure validator and bounded decoder, sampling 64 indices per side or every
