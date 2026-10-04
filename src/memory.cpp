@@ -69,6 +69,10 @@ namespace Stockfish {
 // must be freed with std_aligned_free().
 
 void* std_aligned_alloc(usize alignment, usize size) {
+    alignment = std::max(alignment, sizeof(void*));
+    if ((alignment & (alignment - 1)) || size > std::numeric_limits<usize>::max() - (alignment - 1))
+        return nullptr;
+    size = (size + alignment - 1) & ~(alignment - 1);
 #if defined(_ISOC11_SOURCE)
     return aligned_alloc(alignment, size);
 #elif defined(POSIXALIGNEDALLOC)
@@ -241,7 +245,9 @@ void aligned_large_pages_free(void* mem) {
         DWORD err = GetLastError();
         std::cerr << "Failed to free large page memory. Error code: 0x" << std::hex << err
                   << std::dec << std::endl;
+#ifndef STOCKFISH_EMBEDDED
         exit(EXIT_FAILURE);
+#endif
     }
 }
 
@@ -259,7 +265,9 @@ void aligned_large_pages_free(void* mem) {
             if (munmap(mem, it->second) != 0)
             {
                 std::cerr << "munmap failed: " << strerror(errno) << std::endl;
+#ifndef STOCKFISH_EMBEDDED
                 exit(EXIT_FAILURE);
+#endif
             }
             large_page_sizes.erase(it);
             return;

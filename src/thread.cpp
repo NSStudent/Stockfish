@@ -44,6 +44,53 @@
 
 namespace Stockfish {
 
+void ThreadPool::set_on_failure(std::function<void(std::string_view)> callback) {
+    std::lock_guard<std::mutex> lock(failureMutex);
+    onFailure = std::move(callback);
+}
+
+void ThreadPool::report_failure(std::exception_ptr error) noexcept {
+#ifdef STOCKFISH_EMBEDDED
+    stop = true;
+    try {
+        std::function<void(std::string_view)> callback;
+        {
+            std::lock_guard<std::mutex> lock(failureMutex);
+            if (failure)
+                return;
+            failure = error;
+            callback = std::move(onFailure);
+        }
+        if (callback)
+        {
+            try {
+                std::rethrow_exception(error);
+            } catch (const std::exception& e) {
+                callback(e.what());
+            } catch (...) {
+                callback("Unknown Stockfish worker exception");
+            }
+        }
+    } catch (...) {
+        // Error reporting must never let an exception cross the native thread boundary.
+    }
+#else
+    (void) error;
+#endif
+}
+
+void ThreadPool::rethrow_failure() const {
+#ifdef STOCKFISH_EMBEDDED
+    std::exception_ptr error;
+    {
+        std::lock_guard<std::mutex> lock(failureMutex);
+        error = failure;
+    }
+    if (error)
+        std::rethrow_exception(error);
+#endif
+}
+
 // Constructor launches the thread and waits until it goes to sleep
 // in idle_loop(). Note that 'searching' and 'exit' should be already set.
 Thread::Thread(Search::SharedState&                    sharedState,
@@ -56,15 +103,23 @@ Thread::Thread(Search::SharedState&                    sharedState,
     idxInNuma(numaN),
     totalNuma(totalNumaCount),
     nthreads(sharedState.options["Threads"]),
+    pool(sharedState.threads),
     stdThread(
       create_native_thread(NativeThreadOptions{}.setLargeStack(true), &Thread::idle_loop, this)) {
 
     if (!stdThread.joinable())
     {
         std::cerr << "Failed to create search thread\n";
+#ifdef STOCKFISH_EMBEDDED
+        throw std::runtime_error("Failed to create search thread");
+#else
         std::exit(EXIT_FAILURE);
+#endif
     }
 
+#ifdef STOCKFISH_EMBEDDED
+    try {
+#endif
     wait_for_search_finished();
 
     run_custom_job([this, &binder, &sharedState, &sm, n]() {
@@ -77,6 +132,21 @@ Thread::Thread(Search::SharedState&                    sharedState,
     });
 
     wait_for_search_finished();
+    pool.rethrow_failure();
+#ifdef STOCKFISH_EMBEDDED
+    } catch (...) {
+        // The Thread destructor is not called when its constructor throws.
+        // Stop and join the partially constructed native thread explicitly.
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            exit = true;
+            searching = true;
+        }
+        cv.notify_all();
+        stdThread.join();
+        throw;
+    }
+#endif
 }
 
 
@@ -84,10 +154,14 @@ Thread::Thread(Search::SharedState&                    sharedState,
 // for its termination. Thread should be already waiting.
 Thread::~Thread() {
 
-    assert(!searching);
-
-    exit = true;
-    start_searching();
+    pool.stop = true;
+    wait_for_search_finished();
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        exit = true;
+        searching = true;
+    }
+    cv.notify_all();
     stdThread.join();
 }
 
@@ -143,7 +217,17 @@ void Thread::idle_loop() {
         lk.unlock();
 
         if (job)
+        {
+#ifdef STOCKFISH_EMBEDDED
+            try {
+                job();
+            } catch (...) {
+                pool.report_failure(std::current_exception());
+            }
+#else
             job();
+#endif
+        }
     }
 }
 
@@ -161,9 +245,11 @@ void ThreadPool::set(const NumaConfig&                           numaConfig,
                      Search::SharedState                         sharedState,
                      const Search::SearchManager::UpdateContext& updateContext) {
 
+    rethrow_failure();
     if (threads.size() > 0)  // destroy any existing thread(s)
     {
-        main_thread()->wait_for_search_finished();
+        stop = true;
+        wait_for_all_threads();
 
         threads.clear();
 
@@ -174,6 +260,9 @@ void ThreadPool::set(const NumaConfig&                           numaConfig,
 
     if (requested > 0)  // create new thread(s)
     {
+#ifdef STOCKFISH_EMBEDDED
+        try {
+#endif
         // Binding threads may be problematic when there's multiple NUMA nodes and
         // multiple Stockfish instances running. In particular, if each instance
         // runs a single thread then they would all be mapped to the first NUMA node.
@@ -254,6 +343,16 @@ void ThreadPool::set(const NumaConfig&                           numaConfig,
         clear();
 
         main_thread()->wait_for_search_finished();
+        rethrow_failure();
+#ifdef STOCKFISH_EMBEDDED
+        } catch (...) {
+            stop = true;
+            wait_for_all_threads();
+            threads.clear();
+            boundThreadToNumaNode.clear();
+            throw;
+        }
+#endif
     }
 }
 
@@ -268,6 +367,8 @@ void ThreadPool::clear() {
 
     for (auto&& th : threads)
         th->wait_for_search_finished();
+
+    rethrow_failure();
 
     // These two affect the time taken on the first move of a game:
     main_manager()->bestPreviousAverageScore = VALUE_INFINITE;
@@ -287,6 +388,7 @@ void ThreadPool::run_on_thread(usize threadId, std::function<void()> f) {
 void ThreadPool::wait_on_thread(usize threadId) {
     assert(threads.size() > threadId);
     threads[threadId]->wait_for_search_finished();
+    rethrow_failure();
 }
 
 usize ThreadPool::num_threads() const { return threads.size(); }
@@ -300,6 +402,7 @@ void ThreadPool::start_thinking(const OptionsMap&  options,
                                 Search::LimitsType limits) {
 
     main_thread()->wait_for_search_finished();
+    rethrow_failure();
 
     main_manager()->stopOnPonderhit = stop = false;
     main_manager()->ponder                 = limits.ponderMode;
@@ -351,6 +454,7 @@ void ThreadPool::start_thinking(const OptionsMap&  options,
     for (auto&& th : threads)
         th->wait_for_search_finished();
 
+    rethrow_failure();
     main_thread()->start_searching();
 }
 
@@ -424,6 +528,12 @@ void ThreadPool::wait_for_search_finished() const {
     for (auto&& th : threads)
         if (th != threads.front())
             th->wait_for_search_finished();
+    rethrow_failure();
+}
+
+void ThreadPool::wait_for_all_threads() const {
+    for (auto&& th : threads)
+        th->wait_for_search_finished();
 }
 
 std::vector<usize> ThreadPool::get_bound_thread_to_numa_node() const {

@@ -62,7 +62,10 @@ class Engine {
     Engine& operator=(const Engine&) = delete;
     Engine& operator=(Engine&&)      = delete;
 
-    ~Engine() { wait_for_search_finished(); }
+    ~Engine() {
+        stop();
+        threads.wait_for_all_threads();
+    }
 
     std::variant<u64, PositionSetError> perft(const std::string& fen, Depth depth, bool isChess960);
 
@@ -91,6 +94,16 @@ class Engine {
     void set_on_bestmove(std::function<void(std::string_view, std::string_view)>&&);
     void set_on_start(std::function<void()>&&);
     void set_on_verify_network(std::function<void(std::string_view)>&&);
+    void set_on_failure(std::function<void(std::string_view)> callback) {
+        threads.set_on_failure(std::move(callback));
+    }
+#ifdef FISCHER_TESTING
+    void fischer_test_job(usize threadId, std::function<void()> job) {
+        threads.run_on_thread(threadId, std::move(job));
+    }
+    void fischer_test_wait(usize threadId) { threads.wait_on_thread(threadId); }
+    bool fischer_test_stopped() const { return threads.stop; }
+#endif
 
     // network related
 

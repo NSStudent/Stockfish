@@ -22,6 +22,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -103,6 +104,7 @@ class Thread {
     std::condition_variable   cv;
     usize                     idx, idxInNuma, totalNuma, nthreads;
     bool                      exit = false, searching = true;  // Set before starting std::thread
+    ThreadPool&               pool;
     NativeThread              stdThread;
     NumaReplicatedAccessToken numaAccessToken;
 };
@@ -119,7 +121,8 @@ class ThreadPool {
         // destroy any existing thread(s)
         if (threads.size() > 0)
         {
-            main_thread()->wait_for_search_finished();
+            stop = true;
+            wait_for_all_threads();
 
             threads.clear();
         }
@@ -147,6 +150,7 @@ class ThreadPool {
     Thread*                get_best_thread() const;
     void                   start_searching();
     void                   wait_for_search_finished() const;
+    void                   wait_for_all_threads() const;
 
     std::vector<usize> get_bound_thread_to_numa_node() const;
     std::vector<usize> get_bound_thread_count_by_numa_node() const;
@@ -154,7 +158,11 @@ class ThreadPool {
 
     void ensure_network_replicated();
 
-    std::atomic_bool stop, increaseDepth;
+    void set_on_failure(std::function<void(std::string_view)> callback);
+    void report_failure(std::exception_ptr error) noexcept;
+    void rethrow_failure() const;
+
+    std::atomic_bool stop{false}, increaseDepth{false};
 
     auto cbegin() const noexcept { return threads.cbegin(); }
     auto begin() noexcept { return threads.begin(); }
@@ -167,6 +175,9 @@ class ThreadPool {
     StateListPtr                         setupStates;
     std::vector<std::unique_ptr<Thread>> threads;
     std::vector<NumaIndex>               boundThreadToNumaNode;
+    mutable std::mutex                   failureMutex;
+    std::exception_ptr                   failure;
+    std::function<void(std::string_view)> onFailure;
 
     u64 accumulate(RelaxedAtomic<u64> Search::Worker::* member) const {
 

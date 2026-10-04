@@ -420,7 +420,11 @@ std::vector<std::string> setup_bench(const std::string& currentFen, std::istream
         if (!file.is_open())
         {
             std::cerr << "Unable to open file " << fenFile << std::endl;
+#ifdef STOCKFISH_EMBEDDED
+            throw std::runtime_error("Unable to open benchmark file: " + fenFile);
+#else
             exit(EXIT_FAILURE);
+#endif
         }
 
         while (getline(file, fen))

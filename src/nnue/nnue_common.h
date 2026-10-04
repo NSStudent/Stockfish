@@ -110,13 +110,13 @@ constexpr IntType ceil_to_multiple(IntType n, IntType base) {
 // necessary to return a result with the byte ordering of the compiling machine.
 template<typename IntType>
 inline IntType read_little_endian(std::istream& stream) {
-    IntType result;
+    IntType result{};
 
     if (IsLittleEndian)
         stream.read(reinterpret_cast<char*>(&result), sizeof(IntType));
     else
     {
-        u8                            u[sizeof(IntType)];
+        u8                            u[sizeof(IntType)]{};
         std::make_unsigned_t<IntType> v = 0;
 
         stream.read(reinterpret_cast<char*>(u), sizeof(IntType));
@@ -198,6 +198,8 @@ inline void read_leb_128_detail(std::istream& stream,
 
     static_assert(std::is_signed_v<IntType>, "Not implemented for unsigned types");
     static_assert(sizeof(IntType) <= 4, "Not implemented for types larger than 32 bit");
+    constexpr usize Bits = sizeof(IntType) * 8;
+    constexpr usize MaxBytes = (Bits + 6) / 7;
 
     u32   result = 0;
     usize shift = 0, i = 0;
@@ -219,6 +221,22 @@ inline void read_leb_128_detail(std::istream& stream,
 
         u8 byte = buf[buf_pos++];
         --bytes_left;
+        if (shift >= MaxBytes * 7)
+        {
+            stream.setstate(std::ios::failbit);
+            return;
+        }
+        if (shift + 7 > Bits)
+        {
+            const usize remaining = Bits - shift;
+            const u8 high = (byte & 0x7f) >> remaining;
+            const u8 expected = byte & (u8(1) << (remaining - 1)) ? u8(0x7f >> remaining) : 0;
+            if ((byte & 0x80) || high != expected)
+            {
+                stream.setstate(std::ios::failbit);
+                return;
+            }
+        }
         result |= u32(byte & 0x7f) << (shift % 32);
         shift += 7;
 
@@ -245,6 +263,13 @@ inline void read_leb_128(std::istream& stream, Arrays&... outs) {
     }
 
     auto                 bytes_left = read_little_endian<u32>(stream);
+    const usize count = (outs.size() + ...);
+    const usize maxBytes = (usize(outs.size() * ((sizeof(typename Arrays::value_type) * 8 + 6) / 7)) + ...);
+    if (!stream || bytes_left < count || bytes_left > maxBytes)
+    {
+        stream.setstate(std::ios::failbit);
+        return;
+    }
     std::array<u8, 8192> buf;
     u32                  buf_pos = 0, buf_end = 0;
 
@@ -268,6 +293,13 @@ inline void read_leb_128(std::istream& stream, IntType* out, usize expected) {
     }
 
     auto                 bytes_left = read_little_endian<u32>(stream);
+    constexpr usize maxBytes = (sizeof(IntType) * 8 + 6) / 7;
+    if (!stream || bytes_left < expected || bytes_left / maxBytes > expected
+        || (bytes_left / maxBytes == expected && bytes_left % maxBytes != 0))
+    {
+        stream.setstate(std::ios::failbit);
+        return;
+    }
     std::array<u8, 8192> buf;
     u32                  buf_pos = 0, buf_end = 0;
 

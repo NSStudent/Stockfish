@@ -19,6 +19,8 @@
 #ifndef THREAD_NATIVE_H_INCLUDED
 #define THREAD_NATIVE_H_INCLUDED
 
+#include "embedded_test.h"
+
 #ifdef _MSC_VER
     #include <thread>
 #else
@@ -55,6 +57,10 @@ template<class Function, class... Args>
 NativeThread create_native_thread(NativeThreadOptions options, Function&& fun, Args&&... args) {
     // TODO: implement fallible thread creation for MSVC
     (void) options;
+#ifdef FISCHER_TESTING
+    if (options.largeStack && EmbeddedTestHooks::consume_failure(EmbeddedTestHooks::threadCountdown))
+        return NativeThread{};
+#endif
     return NativeThread(std::forward<Function>(fun), std::forward<Args>(args)...);
 }
 
@@ -89,10 +95,19 @@ class NativeThread {
 
     void start(NativeThreadOptions options, ThreadCallableBase* func) {
         pthread_attr_t attr_storage, *attr = &attr_storage;
-        pthread_attr_init(attr);
+        if (pthread_attr_init(attr) != 0)
+        {
+            delete func;
+            return;
+        }
         if (options.largeStack)
         {
-            pthread_attr_setstacksize(attr, TH_STACK_SIZE);
+            if (pthread_attr_setstacksize(attr, TH_STACK_SIZE) != 0)
+            {
+                pthread_attr_destroy(attr);
+                delete func;
+                return;
+            }
         }
 
         auto start_routine = [](void* ptr) -> void* {
@@ -153,6 +168,10 @@ template<class Function, class... Args>
 inline NativeThread
 create_native_thread(NativeThreadOptions options, Function&& fun, Args&&... args) {
     NativeThread thread{};
+#ifdef FISCHER_TESTING
+    if (options.largeStack && EmbeddedTestHooks::consume_failure(EmbeddedTestHooks::threadCountdown))
+        return thread;
+#endif
     using Callable = ThreadCallable<std::decay_t<Function>, std::decay_t<Args>...>;
     if (auto func =
           new (std::nothrow) Callable(std::forward<Function>(fun), std::forward<Args>(args)...))

@@ -180,6 +180,8 @@ static_assert(sizeof(Cluster) == 32, "Suboptimal Cluster size");
 // Transposition table consists of clusters and each cluster consists
 // of ClusterSize number of TTEntry.
 void TranspositionTable::resize(usize mbSize, ThreadPool& threads) {
+    if (mbSize > std::numeric_limits<usize>::max() / (1024 * 1024))
+        report_failed_allocation(std::numeric_limits<usize>::max());
     aligned_large_pages_free(table);
 
     clusterCount  = mbSize * 1024 * 1024 / sizeof(Cluster);

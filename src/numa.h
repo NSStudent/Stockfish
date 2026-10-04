@@ -24,6 +24,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <exception>
+#include <stdexcept>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -74,6 +76,15 @@ using GetThreadSelectedCpuSetMasks_t = BOOL (*)(HANDLE, PGROUP_AFFINITY, USHORT,
 #include "thread_native.h"
 
 namespace Stockfish {
+
+[[noreturn]] inline void report_numa_failure() {
+#ifdef STOCKFISH_EMBEDDED
+    throw std::runtime_error("NUMA operation failed");
+#else
+    std::exit(EXIT_FAILURE);
+#endif
+}
+
 
 using CpuIndex  = usize;
 using NumaIndex = usize;
@@ -300,7 +311,11 @@ inline WindowsAffinity get_process_affinity() {
 
         if (GetThreadSelectedCpuSetMasks_f != nullptr)
         {
+            std::exception_ptr error;
             NativeThread th = create_native_thread(NativeThreadOptions{}, [&]() {
+#ifdef STOCKFISH_EMBEDDED
+                try {
+#endif
                 std::set<CpuIndex> cpus;
                 bool               isAffinityFull = true;
 
@@ -364,9 +379,19 @@ inline WindowsAffinity get_process_affinity() {
                 {
                     affinity.oldApi = std::move(cpus);
                 }
+#ifdef STOCKFISH_EMBEDDED
+                } catch (...) {
+                    error = std::current_exception();
+                }
+#endif
             });
-
+            if (!th.joinable())
+                report_numa_failure();
             th.join();
+#ifdef STOCKFISH_EMBEDDED
+            if (error)
+                std::rethrow_exception(error);
+#endif
         }
     }
 
@@ -439,7 +464,9 @@ inline std::set<CpuIndex> get_process_affinity() {
 
     cpu_set_t* mask = CPU_ALLOC(MaxNumCpus);
     if (mask == nullptr)
-        std::exit(EXIT_FAILURE);
+        report_numa_failure();
+    auto freeMask = [](cpu_set_t* pointer) { CPU_FREE(pointer); };
+    std::unique_ptr<cpu_set_t, decltype(freeMask)> maskOwner(mask, freeMask);
 
     const usize masksize = CPU_ALLOC_SIZE(MaxNumCpus);
 
@@ -449,15 +476,12 @@ inline std::set<CpuIndex> get_process_affinity() {
 
     if (status != 0)
     {
-        CPU_FREE(mask);
-        std::exit(EXIT_FAILURE);
+        report_numa_failure();
     }
 
     for (CpuIndex c = 0; c < MaxNumCpus; ++c)
         if (CPU_ISSET_S(c, masksize, mask))
             cpus.insert(c);
-
-    CPU_FREE(mask);
 
     return cpus;
 }
@@ -466,13 +490,40 @@ inline std::set<CpuIndex> get_process_affinity() {
 
 #if defined(__linux__) && !defined(__ANDROID__)
 
+#ifndef STOCKFISH_EMBEDDED
 inline static const auto STARTUP_PROCESSOR_AFFINITY = get_process_affinity();
+#endif
+inline const std::set<CpuIndex>& startup_processor_affinity() {
+#ifdef STOCKFISH_EMBEDDED
+    static const auto affinity = get_process_affinity();
+    return affinity;
+#else
+    return STARTUP_PROCESSOR_AFFINITY;
+#endif
+}
 
 #elif defined(_WIN64)
 
+#ifndef STOCKFISH_EMBEDDED
 inline static const auto STARTUP_PROCESSOR_AFFINITY = get_process_affinity();
 inline static const auto STARTUP_USE_OLD_AFFINITY_API =
   STARTUP_PROCESSOR_AFFINITY.likely_used_old_api();
+#endif
+inline const WindowsAffinity& startup_processor_affinity() {
+#ifdef STOCKFISH_EMBEDDED
+    static const auto affinity = get_process_affinity();
+    return affinity;
+#else
+    return STARTUP_PROCESSOR_AFFINITY;
+#endif
+}
+inline bool startup_use_old_affinity_api() {
+#ifdef STOCKFISH_EMBEDDED
+    return startup_processor_affinity().likely_used_old_api();
+#else
+    return STARTUP_USE_OLD_AFFINITY_API;
+#endif
+}
 
 #endif
 
@@ -557,7 +608,7 @@ class NumaConfig {
         std::optional<std::set<CpuIndex>> allowedCpus;
 
         if (respectProcessAffinity)
-            allowedCpus = STARTUP_PROCESSOR_AFFINITY.get_combined();
+            allowedCpus = startup_processor_affinity().get_combined();
 
         // The affinity cannot be determined in all cases on Windows,
         // but we at least guarantee that the number of allowed processors
@@ -572,7 +623,7 @@ class NumaConfig {
         std::set<CpuIndex> allowedCpus;
 
         if (respectProcessAffinity)
-            allowedCpus = STARTUP_PROCESSOR_AFFINITY;
+            allowedCpus = startup_processor_affinity();
 
         auto is_cpu_allowed = [respectProcessAffinity, &allowedCpus](CpuIndex c) {
             return !respectProcessAffinity || allowedCpus.count(c) == 1;
@@ -835,13 +886,13 @@ class NumaConfig {
 
     NumaReplicatedAccessToken bind_current_thread_to_numa_node(NumaIndex n) const {
         if (n >= nodes.size() || nodes[n].empty())
-            std::exit(EXIT_FAILURE);
+            report_numa_failure();
 
 #if defined(__linux__) && !defined(__ANDROID__)
 
         cpu_set_t* mask = CPU_ALLOC(highestCpuIndex + 1);
         if (mask == nullptr)
-            std::exit(EXIT_FAILURE);
+            report_numa_failure();
 
         const usize masksize = CPU_ALLOC_SIZE(highestCpuIndex + 1);
 
@@ -855,7 +906,7 @@ class NumaConfig {
         CPU_FREE(mask);
 
         if (status != 0)
-            std::exit(EXIT_FAILURE);
+            report_numa_failure();
 
         // We yield this thread just to be sure it gets rescheduled.
         // This is defensive, allowed because this code is not performance critical.
@@ -895,7 +946,7 @@ class NumaConfig {
             const BOOL status =
               SetThreadSelectedCpuSetMasks_f(hThread, groupAffinities.get(), numProcGroups);
             if (status == 0)
-                std::exit(EXIT_FAILURE);
+                report_numa_failure();
 
             // We yield this thread just to be sure it gets rescheduled.
             // This is defensive, allowed because this code is not performance critical.
@@ -903,7 +954,7 @@ class NumaConfig {
         }
 
         // Sometimes we need to force the old API, but do not use it unless necessary.
-        if (SetThreadSelectedCpuSetMasks_f == nullptr || STARTUP_USE_OLD_AFFINITY_API)
+        if (SetThreadSelectedCpuSetMasks_f == nullptr || startup_use_old_affinity_api())
         {
             // On earlier windows version (since windows 7) we cannot run a single thread
             // on multiple processor groups, so we need to restrict the group.
@@ -943,7 +994,7 @@ class NumaConfig {
 
             const BOOL status = SetThreadGroupAffinity(hThread, &affinity, nullptr);
             if (status == 0)
-                std::exit(EXIT_FAILURE);
+                report_numa_failure();
 
             // We yield this thread just to be sure it gets rescheduled. This is
             // defensive, allowed because this code is not performance critical.
@@ -957,18 +1008,29 @@ class NumaConfig {
 
     template<typename FuncT>
     void execute_on_numa_node(NumaIndex n, FuncT&& f) const {
-        NativeThread th = create_native_thread(NativeThreadOptions{}, [this, &f, n]() {
-            bind_current_thread_to_numa_node(n);
-            std::forward<FuncT>(f)();
+        std::exception_ptr error;
+        NativeThread th = create_native_thread(NativeThreadOptions{}, [this, &f, n, &error]() {
+#ifdef STOCKFISH_EMBEDDED
+            try {
+#endif
+                bind_current_thread_to_numa_node(n);
+                std::forward<FuncT>(f)();
+#ifdef STOCKFISH_EMBEDDED
+            } catch (...) {
+                error = std::current_exception();
+            }
+#endif
         });
 
         if (!th.joinable())
         {
             std::cerr << "Failed to execute function on NUMA node\n";
-            std::exit(EXIT_FAILURE);
+            report_numa_failure();
         }
 
         th.join();
+        if (error)
+            std::rethrow_exception(error);
     }
 
     std::vector<std::set<CpuIndex>> nodes;

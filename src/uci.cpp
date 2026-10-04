@@ -111,6 +111,18 @@ void UCIEngine::loop() {
         token.clear();  // Avoid a stale if getline() returns nothing or a blank line
         is >> token;
 
+#ifdef STOCKFISH_EMBEDDED
+        // Configuration and diagnostics may touch resources used by search workers.
+        // A UCI host can submit these at any time, including during infinite search.
+        if (token == "setoption" || token == "position" || token == "ucinewgame"
+            || token == "flip" || token == "bench" || token == BenchmarkCommand
+            || token == "eval" || token == "export_net" || token == "d")
+        {
+            engine.stop();
+            engine.wait_for_search_finished();
+        }
+#endif
+
         if (token == "quit" || token == "stop")
             engine.stop();
 

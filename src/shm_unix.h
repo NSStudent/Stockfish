@@ -54,6 +54,12 @@
 #include "misc.h"
 #include "thread_native.h"
 
+#ifdef STOCKFISH_EMBEDDED
+    #define STOCKFISH_SHM_FALLIBLE
+#else
+    #define STOCKFISH_SHM_FALLIBLE noexcept
+#endif
+
 #if defined(__linux__) && !defined(MADV_COLLAPSE)
     #define MADV_COLLAPSE 25
 #endif
@@ -183,8 +189,13 @@ struct InitLock {
         if (!lock_fd.is_valid())
             return {};
 
-        // Blocks here if another process is currently initializing
-        while (flock(lock_fd.get(), LOCK_EX) == -1)
+        // Embedded sessions can fall back to local memory if a peer is busy.
+#ifdef STOCKFISH_EMBEDDED
+        constexpr int flags = LOCK_EX | LOCK_NB;
+#else
+        constexpr int flags = LOCK_EX;
+#endif
+        while (flock(lock_fd.get(), flags) == -1)
         {
             if (errno != EINTR)
                 return {};  // failed to acquire
@@ -233,7 +244,7 @@ class SharedMemory {
     }
 
    public:
-    explicit SharedMemory(const std::string& name, const TempRoot& tempRoot) noexcept :
+    explicit SharedMemory(const std::string& name, const TempRoot& tempRoot) STOCKFISH_SHM_FALLIBLE :
         name_(name),
         shared_dir_(tempRoot.prefix + "/" + make_sentinel_base(name)),
         init_lock_path_(shared_dir_ + "/init_lock"),
@@ -286,10 +297,12 @@ class SharedMemory {
     }
 
     // Discover all peers in the shared dir
-    std::vector<std::string> get_peer_sockets() noexcept {
+    std::vector<std::string> get_peer_sockets() STOCKFISH_SHM_FALLIBLE {
         std::vector<std::string> peer_sockets;
         if (DIR* dir = opendir(shared_dir_.c_str()))
         {
+            auto closeDirectory = [](DIR* pointer) { closedir(pointer); };
+            std::unique_ptr<DIR, decltype(closeDirectory)> directoryOwner(dir, closeDirectory);
             struct dirent* entry;
             while ((entry = readdir(dir)) != nullptr)
             {
@@ -297,7 +310,6 @@ class SharedMemory {
                 if (name.size() >= 5 && name.compare(name.size() - 5, 5, ".sock") == 0)
                     peer_sockets.push_back(shared_dir_ + "/" + name);
             }
-            closedir(dir);
         }
         return peer_sockets;
     }
@@ -312,7 +324,7 @@ class SharedMemory {
         return fd;
     }
 
-    UniqueFd try_receive_memfd(const std::string& their_path) noexcept {
+    UniqueFd try_receive_memfd(const std::string& their_path) STOCKFISH_SHM_FALLIBLE {
         auto peer_fd = create_unix_socket();
         if (!peer_fd.is_valid())
             return {};
@@ -335,10 +347,8 @@ class SharedMemory {
         if (ret == 0)
         {
             struct msghdr   msg                = {};
-            const usize     space              = CMSG_SPACE(sizeof(int));
-            constexpr usize alignement         = alignof(struct cmsghdr);
-            auto            v                  = std::make_unique<std::byte[]>(space + alignement);
-            std::byte*      control_msg_buffer = align_ptr_up<alignement>(v.get());
+            constexpr usize space = CMSG_SPACE(sizeof(int));
+            alignas(struct cmsghdr) std::byte control_msg_buffer[space] = {};
 
             char         buf[1];
             struct iovec iov[1];
@@ -364,7 +374,8 @@ class SharedMemory {
             {
                 cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
                 // Receive rights to the memfd from the peer; see make_server_thread
-                if (cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
+                if (cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS
+                    && cmsg->cmsg_len >= CMSG_LEN(sizeof(int)) && !(msg.msg_flags & MSG_CTRUNC))
                 {
                     int received_fd;
                     memcpy(&received_fd, CMSG_DATA(cmsg), sizeof(received_fd));
@@ -434,10 +445,8 @@ class SharedMemory {
                           continue;  // including EINTR
 
                       struct msghdr   msg        = {};
-                      const usize     space      = CMSG_SPACE(sizeof(int));
-                      constexpr usize alignement = alignof(struct cmsghdr);
-                      auto            v = std::make_unique<std::byte[]>(space + alignement);
-                      std::byte*      control_msg_buffer = align_ptr_up<alignement>(v.get());
+                      constexpr usize space = CMSG_SPACE(sizeof(int));
+                      alignas(struct cmsghdr) std::byte control_msg_buffer[space] = {};
 
 
                       char  buf[1] = {};
@@ -479,7 +488,7 @@ class SharedMemory {
     }
 
    public:
-    [[nodiscard]] bool open(const T& initial_value) noexcept {
+    [[nodiscard]] bool open(const T& initial_value) STOCKFISH_SHM_FALLIBLE {
         if (socket_path_.size() >= sizeof(sockaddr_un::sun_path))
             return false;
 
@@ -593,7 +602,7 @@ class SharedMemory {
 
 template<typename T>
 [[nodiscard]] std::optional<SharedMemory<T>> create_shared(const std::string& name,
-                                                           const T& initial_value) noexcept {
+                                                           const T& initial_value) STOCKFISH_SHM_FALLIBLE {
     auto tempRoot = TempRoot::get_temp_root();
     if (!tempRoot.has_value())
         return std::nullopt;
@@ -604,5 +613,7 @@ template<typename T>
 }
 
 }  // namespace Stockfish::shm
+
+#undef STOCKFISH_SHM_FALLIBLE
 
 #endif  // #ifndef SHM_UNIX_H_INCLUDED

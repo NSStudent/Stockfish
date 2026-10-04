@@ -311,6 +311,12 @@ bool Network::read_header(std::istream& stream, u32* hashValue, std::string* des
     size       = read_little_endian<u32>(stream);
     if (!stream || version != Version)
         return false;
+#ifdef STOCKFISH_EMBEDDED
+    // Descriptions are metadata, not network tensors. Bound their allocation
+    // independently of the fixed-size parameters that follow them.
+    if (size > 1024 * 1024)
+        return false;
+#endif
 
     constexpr u32 Chunk = 4096;
     char          buf[Chunk];

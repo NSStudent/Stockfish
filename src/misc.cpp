@@ -65,11 +65,22 @@ constexpr std::string_view version = "19";
 
 struct Tie: public std::streambuf {  // MSVC requires split streambuf for cin and cout
 
+    static std::mutex& log_mutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
     Tie(std::streambuf* b, std::streambuf* l) :
         buf(b),
         logBuf(l) {}
 
-    int sync() override { return logBuf->pubsync(), buf->pubsync(); }
+    int sync() override {
+        {
+            std::lock_guard<std::mutex> lock(log_mutex());
+            logBuf->pubsync();
+        }
+        return buf->pubsync();
+    }
     int overflow(int c) override { return log(buf->sputc(char(c)), "<< "); }
     int underflow() override { return buf->sgetc(); }
     int uflow() override { return log(buf->sbumpc(), ">> "); }
@@ -78,6 +89,7 @@ struct Tie: public std::streambuf {  // MSVC requires split streambuf for cin an
 
     int log(int c, const char* prefix) {
 
+        std::lock_guard<std::mutex> lock(log_mutex());
         static int last = '\n';  // Single log file
 
         if (last == '\n')
@@ -92,25 +104,34 @@ class Logger {
     Logger() :
         in(std::cin.rdbuf(), file.rdbuf()),
         out(std::cout.rdbuf(), file.rdbuf()) {}
-    ~Logger() { start(""); }
+    ~Logger() { stop(); }
 
     std::ofstream file;
     Tie           in, out;
+
+    void stop() {
+        // Restore only buffers that are still attached to this logger. A completed
+        // embedded session may already have restored the application's streams.
+        if (std::cout.rdbuf() == &out)
+            std::cout.rdbuf(out.buf);
+        if (std::cin.rdbuf() == &in)
+            std::cin.rdbuf(in.buf);
+        file.close();
+    }
 
    public:
     static void start(const fs::path& fname) {
 
         static Logger l;
 
-        if (l.file.is_open())
-        {
-            std::cout.rdbuf(l.out.buf);
-            std::cin.rdbuf(l.in.buf);
-            l.file.close();
-        }
+        l.stop();
 
         if (!fname.empty())
         {
+            // Capture the active session, rather than retaining the first session's buffers.
+            l.in.buf = std::cin.rdbuf();
+            l.out.buf = std::cout.rdbuf();
+            l.file.clear();
             l.file.open(fname, std::ifstream::out);
 
             if (!l.file.is_open())

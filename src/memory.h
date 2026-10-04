@@ -27,11 +27,13 @@
 #include <iostream>
 #include <memory>
 #include <new>
+#include <limits>
 #include <type_traits>
 #include <utility>
 
 #include "types.h"
 #include "misc.h"
+#include "embedded_test.h"
 
 #if defined(_WIN64)
 
@@ -74,7 +76,11 @@ constexpr usize HugePageSize = usize(1) << 30;
 
 [[noreturn]] inline void report_failed_allocation(usize bytes) {
     std::cerr << "Failed to allocate " << bytes << " bytes." << std::endl;
+#ifdef STOCKFISH_EMBEDDED
+    throw std::bad_alloc();
+#else
     std::exit(EXIT_FAILURE);
+#endif
 }
 
 void* std_aligned_alloc(usize alignment, usize size);
@@ -126,26 +132,48 @@ void memory_deleter_array(T* ptr, FREE_FUNC free_func) {
 }
 
 // Allocates memory for a single object and places it there with placement new
-template<typename T, typename ALLOC_FUNC, typename... Args>
-inline std::enable_if_t<!std::is_array_v<T>, T*> memory_allocator(ALLOC_FUNC alloc_func,
+template<typename T, typename ALLOC_FUNC, typename FREE_FUNC, typename... Args>
+inline std::enable_if_t<!std::is_array_v<T>, T*> memory_allocator(ALLOC_FUNC alloc_func, FREE_FUNC free_func,
                                                                   Args&&... args) {
+#ifdef FISCHER_TESTING
+    if (EmbeddedTestHooks::consume_failure(EmbeddedTestHooks::allocationCountdown))
+        report_failed_allocation(sizeof(T));
+#endif
     void* raw_memory = alloc_func(sizeof(T));
     if (raw_memory == nullptr)
         report_failed_allocation(sizeof(T));
     ASSERT_ALIGNED(raw_memory, alignof(T));
-    return new (raw_memory) T(std::forward<Args>(args)...);
+#ifdef STOCKFISH_EMBEDDED
+    try {
+#endif
+        return new (raw_memory) T(std::forward<Args>(args)...);
+#ifdef STOCKFISH_EMBEDDED
+    } catch (...) {
+        free_func(raw_memory);
+        throw;
+    }
+#else
+    (void) free_func;
+#endif
 }
 
 // Allocates memory for an array of unknown bound and places it there with placement new
-template<typename T, typename ALLOC_FUNC>
+template<typename T, typename ALLOC_FUNC, typename FREE_FUNC>
 inline std::enable_if_t<std::is_array_v<T>, std::remove_extent_t<T>*>
-memory_allocator(ALLOC_FUNC alloc_func, usize num) {
+memory_allocator(ALLOC_FUNC alloc_func, FREE_FUNC free_func, usize num) {
     using ElementType = std::remove_extent_t<T>;
 
     const usize array_offset = std::max(sizeof(usize), alignof(ElementType));
 
+    if (num > (std::numeric_limits<usize>::max() - array_offset) / sizeof(ElementType))
+        report_failed_allocation(std::numeric_limits<usize>::max());
+
     // Save the array size in the memory location
     const usize bytes      = array_offset + num * sizeof(ElementType);
+#ifdef FISCHER_TESTING
+    if (EmbeddedTestHooks::consume_failure(EmbeddedTestHooks::allocationCountdown))
+        report_failed_allocation(bytes);
+#endif
     char*       raw_memory = reinterpret_cast<char*>(alloc_func(bytes));
     if (raw_memory == nullptr)
         report_failed_allocation(bytes);
@@ -153,8 +181,22 @@ memory_allocator(ALLOC_FUNC alloc_func, usize num) {
 
     new (raw_memory) usize(num);
 
-    for (usize i = 0; i < num; ++i)
-        new (raw_memory + array_offset + i * sizeof(ElementType)) ElementType();
+    usize constructed = 0;
+#ifdef STOCKFISH_EMBEDDED
+    try {
+#endif
+        for (; constructed < num; ++constructed)
+            new (raw_memory + array_offset + constructed * sizeof(ElementType)) ElementType();
+#ifdef STOCKFISH_EMBEDDED
+    } catch (...) {
+        while (constructed > 0)
+            reinterpret_cast<ElementType*>(raw_memory + array_offset)[--constructed].~ElementType();
+        free_func(raw_memory);
+        throw;
+    }
+#else
+    (void) free_func;
+#endif
 
     // Need to return the pointer at the start of the array so that
     // the indexing in unique_ptr<T[]> works.
@@ -189,7 +231,7 @@ std::enable_if_t<!std::is_array_v<T>, LargePagePtr<T>> make_unique_large_page(Ar
     static_assert(alignof(T) <= 4096,
                   "aligned_large_pages_alloc() may fail for such a big alignment requirement of T");
 
-    T* obj = memory_allocator<T>(aligned_large_pages_alloc, std::forward<Args>(args)...);
+    T* obj = memory_allocator<T>(aligned_large_pages_alloc, aligned_large_pages_free, std::forward<Args>(args)...);
 
     return LargePagePtr<T>(obj);
 }
@@ -202,7 +244,7 @@ std::enable_if_t<std::is_array_v<T>, LargePagePtr<T>> make_unique_large_page(usi
     static_assert(alignof(ElementType) <= 4096,
                   "aligned_large_pages_alloc() may fail for such a big alignment requirement of T");
 
-    ElementType* memory = memory_allocator<T>(aligned_large_pages_alloc, num);
+    ElementType* memory = memory_allocator<T>(aligned_large_pages_alloc, aligned_large_pages_free, num);
 
     return LargePagePtr<T>(memory);
 }
@@ -233,7 +275,7 @@ using AlignedPtr =
 template<typename T, typename... Args>
 std::enable_if_t<!std::is_array_v<T>, AlignedPtr<T>> make_unique_aligned(Args&&... args) {
     const auto func = [](usize size) { return std_aligned_alloc(alignof(T), size); };
-    T*         obj  = memory_allocator<T>(func, std::forward<Args>(args)...);
+    T*         obj  = memory_allocator<T>(func, std_aligned_free, std::forward<Args>(args)...);
 
     return AlignedPtr<T>(obj);
 }
@@ -244,7 +286,7 @@ std::enable_if_t<std::is_array_v<T>, AlignedPtr<T>> make_unique_aligned(usize nu
     using ElementType = std::remove_extent_t<T>;
 
     const auto   func   = [](usize size) { return std_aligned_alloc(alignof(ElementType), size); };
-    ElementType* memory = memory_allocator<T>(func, num);
+    ElementType* memory = memory_allocator<T>(func, std_aligned_free, num);
 
     return AlignedPtr<T>(memory);
 }

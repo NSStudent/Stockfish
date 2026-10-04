@@ -54,6 +54,9 @@ class UCIEngine {
     Search::LimitsType parse_limits(std::istream& is);
 
     auto& engine_options() { return engine.get_options(); }
+    void set_on_failure(std::function<void(std::string_view)> callback) {
+        engine.set_on_failure(std::move(callback));
+    }
 
    private:
     Engine      engine;
