@@ -17,6 +17,7 @@
 */
 
 #include "thread.h"
+#include "fischer_qos.h"
 
 #include <algorithm>
 #include <cassert>
@@ -218,6 +219,8 @@ void Thread::idle_loop() {
 
         if (job)
         {
+            // FischerEngine: the search QoS asked for by the app (batch work runs at `utility`).
+            Fischer::apply_search_qos();
 #ifdef STOCKFISH_EMBEDDED
             try {
                 job();
